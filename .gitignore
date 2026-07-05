@@ -1,7 +1,9 @@
 .env
-      data/vrm.db
-      __pycache__/
-      *.pyc
-      venv/
-      .venv/
-      *.egg-info/
+data/vrm.db
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+CLAUDE.md
+.claude/
