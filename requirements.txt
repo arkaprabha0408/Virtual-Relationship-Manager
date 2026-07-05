@@ -5,6 +5,7 @@ pydantic-settings
 langchain
 langgraph
 langchain-openai
+langchain-ollama
 langfuse
 opentelemetry-api
 opentelemetry-sdk

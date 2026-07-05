@@ -17,7 +17,7 @@ from app.config import settings
 from app.tools.db import get_connection
 
 
-fake = Faker("en_GB")
+fake = Faker("en_IN")
 Faker.seed(20240605)
 random.seed(20240605)
 
@@ -72,28 +72,28 @@ def seed_database(db_path: str | None = None) -> None:
             """
         )
 
-        industries = ["manufacturing", "retail", "IT services", "logistics", "pharma"]
+        # annual_revenue in INR — range ₹16 crore to ₹96 crore (mid-market Indian businesses)
         client_specs = [
-            ("Northwind Foods", "manufacturing", 8200000),
-            ("Apex Retail Group", "retail", 5400000),
-            ("BluePeak Systems", "IT services", 3100000),
-            ("Harbor Logistics", "logistics", 7400000),
-            ("Crest Pharma Ltd", "pharma", 9600000),
-            ("Stonebridge Manufacturing", "manufacturing", 4300000),
-            ("Harper & Co", "retail", 2800000),
-            ("Nexora Tech", "IT services", 2500000),
-            ("Marlow Freight", "logistics", 3900000),
-            ("Helix Bio", "pharma", 6200000),
-            ("Summit Components", "manufacturing", 1800000),
-            ("Lumen Outlet", "retail", 1600000),
-            ("KiteCloud", "IT services", 2200000),
-            ("Pioneer Haulage", "logistics", 2600000),
-            ("VitaNova", "pharma", 4700000),
-            ("Blue Harbor Works", "manufacturing", 9200000),
-            ("Mercury Retail", "retail", 3300000),
-            ("Orbital Digital", "IT services", 4200000),
-            ("Northstar Shipping", "logistics", 5000000),
-            ("Aurelia Health", "pharma", 7100000),
+            ("Bharat Forge Industries",     "manufacturing", 820_000_000),
+            ("Reliant Retail Pvt Ltd",      "retail",        540_000_000),
+            ("InfoZen Technologies",        "IT services",   310_000_000),
+            ("SwiftMove Logistics",         "logistics",     740_000_000),
+            ("HealPath Pharma",             "pharma",        960_000_000),
+            ("Kaveri Steelworks",           "manufacturing", 430_000_000),
+            ("Meghna Traders",              "retail",        280_000_000),
+            ("CodeNova Solutions",          "IT services",   250_000_000),
+            ("Ganga Freight Carriers",      "logistics",     390_000_000),
+            ("AyurCore Pharmaceuticals",    "pharma",        620_000_000),
+            ("Deccan Components Ltd",       "manufacturing", 180_000_000),
+            ("Sunrise Mart",                "retail",        160_000_000),
+            ("CloudYuga Systems",           "IT services",   220_000_000),
+            ("Vayupath Transport",          "logistics",     260_000_000),
+            ("BioShakti Labs",              "pharma",        470_000_000),
+            ("Trikuta Engineering",         "manufacturing", 920_000_000),
+            ("Bhavani Retail Chain",        "retail",        330_000_000),
+            ("Zenith Infotech",             "IT services",   420_000_000),
+            ("Sarayu Shipping",             "logistics",     500_000_000),
+            ("Dhanvantari Lifesciences",    "pharma",        710_000_000),
         ]
 
         client_ids: list[int] = []
@@ -110,7 +110,12 @@ def seed_database(db_path: str | None = None) -> None:
             account_count = random.randint(1, 3)
             for account_index in range(account_count):
                 account_type = account_types[account_index % len(account_types)]
-                opening_balance = random.randint(50000, 400000) if account_type != "FD" else random.randint(200000, 800000)
+                # balances in INR: ₹50L–₹4 crore for current/OD, ₹2–₹8 crore for FD
+                opening_balance = (
+                    random.randint(5_000_000, 40_000_000)
+                    if account_type != "FD"
+                    else random.randint(20_000_000, 80_000_000)
+                )
                 connection.execute(
                     "INSERT INTO accounts (client_id, type, balance) VALUES (?, ?, ?)",
                     (client_id, account_type, opening_balance),
@@ -119,24 +124,28 @@ def seed_database(db_path: str | None = None) -> None:
         account_ids = [row[0] for row in connection.execute("SELECT id FROM accounts")]
 
         for account_id in account_ids:
-            account_type = connection.execute("SELECT type FROM accounts WHERE id = ?", (account_id,)).fetchone()[0]
-            client_id = connection.execute("SELECT client_id FROM accounts WHERE id = ?", (account_id,)).fetchone()[0]
-            annual_revenue = connection.execute("SELECT annual_revenue FROM clients WHERE id = ?", (client_id,)).fetchone()[0]
+            client_id = connection.execute(
+                "SELECT client_id FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()[0]
+            annual_revenue = connection.execute(
+                "SELECT annual_revenue FROM clients WHERE id = ?", (client_id,)
+            ).fetchone()[0]
             monthly_base = annual_revenue / 12.0
             month_start = date(2024, 1, 1)
             for month_offset in range(12):
                 current_month = month_start + timedelta(days=30 * month_offset)
-                month_label = current_month.strftime("%Y-%m")
                 month_inflow = monthly_base * random.uniform(0.75, 1.15)
                 month_outflow = monthly_base * random.uniform(0.65, 1.05)
-                if client_id in {1, 2, 3, 4, 5} and month_offset in {2, 5, 8}:
-                    month_outflow *= 1.4
-                if client_id % 4 == 0 and month_offset in {2, 5, 9}:
-                    month_outflow *= 1.25
-                if client_id % 5 == 0 and month_offset in {3, 8}:
-                    month_outflow *= 1.35
-                if client_id % 6 == 0 and month_offset in {1, 11}:
-                    month_outflow *= 1.2
+                # Inject cash-gap months: force outflow > inflow for designated clients/months
+                is_gap_month = (
+                    (client_id in {1, 2, 3, 4, 5} and month_offset in {2, 5, 8})
+                    or (client_id in {4, 8, 12, 16} and month_offset in {3, 9})
+                    or (client_id in {5, 10, 15, 20} and month_offset in {4, 8})
+                    or (client_id in {6, 12, 18} and month_offset in {1, 11})
+                )
+                if is_gap_month:
+                    # Need outflow > 1.5× inflow so aggregated txns (8 out vs 12 in) show a gap
+                    month_outflow = month_inflow * random.uniform(1.6, 2.0)
                 for day_offset in range(24):
                     txn_date = (current_month + timedelta(days=day_offset)).strftime("%Y-%m-%d")
                     if day_offset % 2 == 0:
@@ -147,7 +156,7 @@ def seed_database(db_path: str | None = None) -> None:
                                 txn_date,
                                 round(month_inflow / 6.0, 2),
                                 "in",
-                                random.choice(["customer receipts", "payroll", "sales", "loan drawdown"]),
+                                random.choice(["customer receipts", "sales", "export proceeds", "loan drawdown"]),
                                 fake.company(),
                                 "income transaction",
                             ),
@@ -160,23 +169,24 @@ def seed_database(db_path: str | None = None) -> None:
                                 txn_date,
                                 round(month_outflow / 6.0, 2),
                                 "out",
-                                random.choice(["vendor payments", "rent", "tax", "utilities", "payroll"]),
+                                random.choice(["vendor payments", "rent", "GST payment", "utilities", "payroll"]),
                                 fake.company(),
                                 "operating expense",
                             ),
                         )
 
+        # min_revenue in INR; rates reflect Indian market (RBI repo-linked)
         product_specs = [
-            ("Working Capital Loan", "lending", "Flexible credit facility for seasonal cash flow needs", 1500000, 9.5, ["invoice finance", "repayment holiday"]),
-            ("Overdraft Facility", "liquidity", "Short-term buffer for day-to-day cash needs", 1000000, 14.0, ["same day access", "interest only on utilized amount"]),
-            ("Invoice Discounting", "lending", "Advance against unpaid invoices", 2000000, 11.5, ["fast approval", "up to 85% of invoice value"]),
-            ("Term Loan", "lending", "Structured medium-term funding for expansion", 3000000, 8.75, ["fixed monthly installments", "competitive pricing"]),
-            ("Fixed Deposit", "deposit", "Secure savings option for surplus liquidity", 500000, 6.5, ["tenor flexibility", "capital protection"]),
-            ("Cash Management Services", "services", "Consolidated payments and collections platform", 1200000, 2.5, ["integrated treasury", "real-time visibility"]),
-            ("Forex Card", "cards", "Multi-currency card for travel and vendor payments", 800000, 3.25, ["global acceptance", "dynamic forex rates"]),
-            ("Trade Finance", "lending", "Letter of credit and import financing support", 4000000, 10.5, ["cross-border support", "documentary processing"]),
-            ("Payroll Solution", "services", "Automation and compliance for payroll processing", 600000, 4.25, ["bulk salary processing", "statutory compliance"]),
-            ("Business Credit Card", "cards", "Expense management card with spend controls", 700000, 2.75, ["expense controls", "reward points"]),
+            ("Working Capital Loan",    "lending",   "Flexible credit for seasonal cash flow needs",        150_000_000, 11.5,  ["MSME priority sector eligible", "repayment holiday option"]),
+            ("Overdraft Facility",      "liquidity", "Short-term buffer for day-to-day cash needs",         100_000_000, 14.5,  ["same-day activation", "interest only on utilized amount"]),
+            ("Invoice Discounting",     "lending",   "Advance against unpaid GST invoices",                 200_000_000, 13.0,  ["up to 90% of invoice value", "fast approval"]),
+            ("Term Loan",               "lending",   "Structured medium-term funding for expansion",        300_000_000, 10.5,  ["fixed EMI", "competitive pricing"]),
+            ("Fixed Deposit",           "deposit",   "Secure parking for surplus liquidity",                 50_000_000,  7.0,  ["flexible tenor 7 days–5 years", "capital protection"]),
+            ("Cash Management Services","services",  "Integrated collections and payments platform",         120_000_000,  2.5,  ["UPI/NEFT/RTGS integration", "real-time dashboard"]),
+            ("Forex Card",              "cards",     "Multi-currency card for imports and travel",            80_000_000,  3.5,  ["zero cross-currency markup", "dynamic forex rates"]),
+            ("Trade Finance",           "lending",   "LC and import/export financing support",               400_000_000, 12.0,  ["SWIFT-enabled", "documentary credit processing"]),
+            ("Payroll Solution",        "services",  "Automated salary disbursement with PF/ESI compliance",  60_000_000,  4.5,  ["bulk salary via NEFT", "statutory compliance dashboard"]),
+            ("Business Credit Card",    "cards",     "Expense management with GST reporting",                 70_000_000,  3.0,  ["GST spend reports", "reward points on vendor payments"]),
         ]
         for name, category, description, min_revenue, interest_rate_or_fee, features in product_specs:
             connection.execute(
@@ -185,10 +195,10 @@ def seed_database(db_path: str | None = None) -> None:
             )
 
         connection.commit()
-        print("Seeded clients", connection.execute("SELECT COUNT(*) FROM clients").fetchone()[0])
-        print("Seeded accounts", connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0])
-        print("Seeded transactions", connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
-        print("Seeded products", connection.execute("SELECT COUNT(*) FROM banking_products").fetchone()[0])
+        print("Seeded clients     :", connection.execute("SELECT COUNT(*) FROM clients").fetchone()[0])
+        print("Seeded accounts    :", connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0])
+        print("Seeded transactions:", connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
+        print("Seeded products    :", connection.execute("SELECT COUNT(*) FROM banking_products").fetchone()[0])
     finally:
         connection.close()
 
