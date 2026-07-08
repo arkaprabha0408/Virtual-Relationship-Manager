@@ -7,7 +7,7 @@ from typing import AsyncIterator
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 
 from app.config import settings
@@ -94,11 +94,23 @@ async def chat(
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Failed to process chat request") from exc
 
-    last_message = result["messages"][-1]
+    # A compound query (e.g. cashflow + product) can bounce through more than one
+    # specialist in a single turn; collect every substantive answer given since the
+    # client's message so a hand-back to the concierge never silently drops one.
+    messages = result["messages"]
+    last_human_idx = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
+    turn_replies = [
+        m for m in messages[last_human_idx + 1 :] if isinstance(m, AIMessage) and m.content
+    ]
+
+    last_message = messages[-1]
     handled_by = getattr(last_message, "name", None) or "concierge"
+    reply = (
+        "\n\n".join(m.content for m in turn_replies) if turn_replies else last_message.content
+    )
     record_handled_by_score(trace.trace_id, handled_by)
     return ChatResponse(
-        reply=last_message.content,
+        reply=reply,
         handled_by=handled_by,
         session_id=request.session_id,
     )

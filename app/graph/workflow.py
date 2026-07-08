@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import uuid4
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool, InjectedToolCallId, tool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
@@ -87,6 +88,134 @@ transfer_to_product_expert = _make_handoff_tool(
 )
 
 
+def _make_hand_back_tool(*, from_agent: str, description: str) -> BaseTool:
+    """Hand a compound query back to the concierge once this specialist's part is answered.
+
+    Unlike _make_handoff_tool, this carries the specialist's answer as a required tool
+    argument rather than relying on the model to also produce it as message content —
+    small models reliably call a tool with an argument, but unreliably combine free-text
+    content with a tool call in the same completion, which was silently dropping the
+    specialist's answer.
+    """
+    tool_name = "transfer_to_concierge"
+
+    @tool(tool_name, description=description)
+    def handoff_tool(
+        answer_so_far: Annotated[
+            str,
+            (
+                "Your complete answer to the part of the client's question that IS in "
+                "your domain. Passed here as an argument (not as your message text) so it "
+                "reaches the client even if you don't also repeat it as message content."
+            ),
+        ],
+        tool_call_id: Annotated[str, InjectedToolCallId],
+        state: Annotated[VRMState, InjectedState],
+    ) -> Command:
+        triggering_message = state["messages"][-1]
+        carried_answer = (
+            [] if triggering_message.content else [AIMessage(content=answer_so_far, name=from_agent)]
+        )
+        tool_message = {
+            "role": "tool",
+            "content": "Transferred to concierge.",
+            "name": tool_name,
+            "tool_call_id": tool_call_id,
+        }
+        return Command(
+            goto="concierge",
+            update={
+                # tool_message must come immediately after the triggering AIMessage to
+                # pair with its tool_call; any carried-over answer goes after that.
+                "messages": state["messages"] + [tool_message] + carried_answer,
+                "client_id": state.get("client_id"),
+            },
+            graph=Command.PARENT,
+        )
+
+    return handoff_tool
+
+
+transfer_to_concierge_from_business_intel = _make_hand_back_tool(
+    from_agent="business_intel",
+    description=(
+        "Hand control back to the concierge because the client's message also asked "
+        "about banking products, loans, or eligibility. Pass your complete cashflow "
+        "answer as the answer_so_far argument."
+    ),
+)
+transfer_to_concierge_from_product_expert = _make_hand_back_tool(
+    from_agent="product_expert",
+    description=(
+        "Hand control back to the concierge because the client's message also asked "
+        "about cashflow, spending, or cash gaps. Pass your complete product answer as "
+        "the answer_so_far argument."
+    ),
+)
+
+
+def _make_completeness_hook(*, current_agent: str, other_agent: str, model: BaseChatModel):
+    """Deterministic safety net for the compound-query hand-back.
+
+    Specialists are prompted to call transfer_to_concierge when the client's message also
+    needs the other domain, but small models don't reliably remember to actually call a
+    tool after already writing a complete text answer — they sometimes just narrate "I'll
+    connect you..." without calling anything, silently dropping the second half of the
+    question. This hook runs after every specialist turn that ends without a tool call and
+    asks a single cheap yes/no question to catch that case, forcing the handoff in code
+    instead of hoping the model remembers.
+    """
+
+    async def hook(state: VRMState) -> dict:
+        messages = state["messages"]
+        last_ai = next(m for m in reversed(messages) if isinstance(m, AIMessage))
+        if last_ai.tool_calls:
+            return {}
+
+        last_human_idx = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
+        turn_messages = messages[last_human_idx + 1 :]
+        other_already_answered = any(
+            isinstance(m, AIMessage) and getattr(m, "name", None) == other_agent and m.content
+            for m in turn_messages
+        )
+        if other_already_answered or not last_ai.content:
+            return {}
+
+        original_query = messages[last_human_idx].content
+        verdict = await model.ainvoke(
+            [
+                SystemMessage(
+                    content=(
+                        f"The client asked: {original_query!r}\n\n"
+                        f"The {current_agent} specialist just answered the part of this "
+                        f"in their own domain. Does the client's message ALSO contain a "
+                        f"distinct question belonging to the {other_agent} specialist's "
+                        "domain that has not been answered yet? Reply with exactly one "
+                        "word: yes or no."
+                    )
+                )
+            ]
+        )
+        if "yes" not in (verdict.content or "").strip().lower():
+            return {}
+
+        handoff_message = AIMessage(
+            content="",
+            name=current_agent,
+            tool_calls=[
+                {
+                    "name": "transfer_to_concierge",
+                    "args": {"answer_so_far": last_ai.content},
+                    "id": f"handback-{uuid4().hex}",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        return {"messages": [handoff_message]}
+
+    return hook
+
+
 def _with_client_context(base_prompt: str):
     def _prompt(state: VRMState) -> list:
         client_id = state.get("client_id")
@@ -101,6 +230,22 @@ def _with_client_context(base_prompt: str):
     return _prompt
 
 
+def _bind_tools_one_at_a_time(model: BaseChatModel, tools: list[BaseTool]) -> BaseChatModel:
+    """Force a single tool call per turn.
+
+    Command-based handoffs can only honor one `goto` target. If the model calls two
+    handoff tools in parallel (e.g. transfer_to_business_intel and
+    transfer_to_product_expert together for a compound query), the second tool call is
+    silently abandoned mid-flight and its tool call is orphaned forever in the history.
+    """
+    if hasattr(model, "bind_tools"):
+        try:
+            return model.bind_tools(tools, parallel_tool_calls=False)
+        except TypeError:
+            pass
+    return model.bind_tools(tools)
+
+
 def build_graph(
     llm: BaseChatModel | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
@@ -108,26 +253,46 @@ def build_graph(
     """Assemble the concierge/business_intel/product_expert StateGraph. Single code path for tests and FastAPI."""
     model = llm or get_llm()
 
+    concierge_tools = [transfer_to_business_intel, transfer_to_product_expert]
+    business_intel_tools = [
+        cashflow_summary_tool,
+        category_breakdown_tool,
+        cash_gaps_tool,
+        transfer_to_concierge_from_business_intel,
+    ]
+    product_expert_tools = [
+        search_products_tool,
+        product_details_tool,
+        eligibility_tool,
+        transfer_to_concierge_from_product_expert,
+    ]
+
     concierge_agent = create_react_agent(
-        model,
-        [transfer_to_business_intel, transfer_to_product_expert],
+        _bind_tools_one_at_a_time(model, concierge_tools),
+        concierge_tools,
         prompt=_with_client_context(CONCIERGE_PROMPT),
         state_schema=VRMState,
         name="concierge",
     )
     business_intel_agent = create_react_agent(
-        model,
-        [cashflow_summary_tool, category_breakdown_tool, cash_gaps_tool],
+        _bind_tools_one_at_a_time(model, business_intel_tools),
+        business_intel_tools,
         prompt=_with_client_context(BUSINESS_INTEL_PROMPT),
         state_schema=VRMState,
         name="business_intel",
+        post_model_hook=_make_completeness_hook(
+            current_agent="business_intel", other_agent="product_expert", model=model
+        ),
     )
     product_expert_agent = create_react_agent(
-        model,
-        [search_products_tool, product_details_tool, eligibility_tool],
+        _bind_tools_one_at_a_time(model, product_expert_tools),
+        product_expert_tools,
         prompt=_with_client_context(PRODUCT_EXPERT_PROMPT),
         state_schema=VRMState,
         name="product_expert",
+        post_model_hook=_make_completeness_hook(
+            current_agent="product_expert", other_agent="business_intel", model=model
+        ),
     )
 
     builder = StateGraph(VRMState)
