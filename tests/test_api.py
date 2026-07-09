@@ -4,19 +4,26 @@ from collections.abc import AsyncIterator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from app import config
 from app.main import app, get_graph
 
 
 class _StubGraph:
+    checkpointer = None
+
     def __init__(self, reply: str = "Stubbed reply", handled_by: str = "business_intel") -> None:
         self.reply = reply
         self.handled_by = handled_by
 
     async def ainvoke(self, state: dict, config: dict) -> dict:
-        return {"messages": [AIMessage(content=self.reply, name=self.handled_by)]}
+        return {
+            "messages": [
+                *state["messages"],
+                AIMessage(content=self.reply, name=self.handled_by),
+            ]
+        }
 
 
 @pytest.fixture()
@@ -58,6 +65,53 @@ async def test_chat_stubbed(client: AsyncClient) -> None:
     assert body["reply"] == "Here is your cashflow summary."
     assert body["handled_by"] == "business_intel"
     assert body["session_id"] == "s1"
+
+
+# ── /sessions ────────────────────────────────────────────────────────────────────
+
+async def test_chat_persists_and_lists_session(client: AsyncClient) -> None:
+    app.dependency_overrides[get_graph] = lambda: _StubGraph(
+        reply="Your cashflow looks healthy.", handled_by="business_intel"
+    )
+    resp = await client.post(
+        "/chat",
+        json={"session_id": "test-session-persist", "client_id": 2, "message": "How is my cashflow?"},
+    )
+    assert resp.status_code == 200
+
+    sessions_resp = await client.get("/sessions")
+    assert sessions_resp.status_code == 200
+    session_ids = {s["session_id"] for s in sessions_resp.json()}
+    assert "test-session-persist" in session_ids
+
+    messages_resp = await client.get("/sessions/test-session-persist/messages")
+    assert messages_resp.status_code == 200
+    messages = messages_resp.json()
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[0]["content"] == "How is my cashflow?"
+    assert messages[1]["content"] == "Your cashflow looks healthy."
+    assert messages[1]["handled_by"] == "business_intel"
+
+
+async def test_get_session_messages_empty_for_unknown_session(client: AsyncClient) -> None:
+    resp = await client.get("/sessions/does-not-exist/messages")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_delete_session_clears_messages(client: AsyncClient) -> None:
+    app.dependency_overrides[get_graph] = lambda: _StubGraph(
+        reply="Here you go.", handled_by="product_expert"
+    )
+    await client.post(
+        "/chat",
+        json={"session_id": "test-session-delete", "client_id": 3, "message": "hi"},
+    )
+    del_resp = await client.delete("/sessions/test-session-delete")
+    assert del_resp.status_code == 200
+
+    messages_resp = await client.get("/sessions/test-session-delete/messages")
+    assert messages_resp.json() == []
 
 
 # ── /clients ─────────────────────────────────────────────────────────────────────

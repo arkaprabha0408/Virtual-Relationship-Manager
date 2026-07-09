@@ -1,5 +1,6 @@
 .env
 data/vrm.db
+data/checkpoints.db*
 __pycache__/
 *.pyc
 venv/

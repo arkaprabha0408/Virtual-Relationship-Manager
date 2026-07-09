@@ -31,6 +31,7 @@ def seed_database(db_path: str | None = None) -> None:
             DROP TABLE IF EXISTS accounts;
             DROP TABLE IF EXISTS clients;
             DROP TABLE IF EXISTS banking_products;
+            DROP TABLE IF EXISTS chat_messages;
 
             CREATE TABLE clients (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,6 +70,19 @@ def seed_database(db_path: str | None = None) -> None:
                 interest_rate_or_fee REAL NOT NULL,
                 features_json TEXT NOT NULL
             );
+
+            CREATE TABLE chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                client_id INTEGER,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                handled_by TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(client_id) REFERENCES clients(id)
+            );
+
+            CREATE INDEX idx_chat_messages_session ON chat_messages(session_id, id);
             """
         )
 

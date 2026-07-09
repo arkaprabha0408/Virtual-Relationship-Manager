@@ -4,6 +4,7 @@ pydantic
 pydantic-settings
 langchain
 langgraph
+langgraph-checkpoint-sqlite
 langchain-openai
 langchain-ollama
 langfuse

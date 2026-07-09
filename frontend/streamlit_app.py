@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import uuid
 
 import pandas as pd
 import requests
@@ -41,6 +40,16 @@ def _post(path: str, json_body: dict) -> dict | None:
         return None
 
 
+def _delete(path: str) -> bool:
+    try:
+        resp = requests.delete(f"{BACKEND_URL}{path}", timeout=TIMEOUT)
+        resp.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as exc:
+        st.error(f"Couldn't reach the backend: {exc}")
+        return False
+
+
 @st.cache_data(ttl=300)
 def get_clients() -> list[dict]:
     return _get("/clients") or []
@@ -77,13 +86,33 @@ def format_inr(amount: float) -> str:
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
+#
+# One chat session per client, persisted server-side (SQLite + LangGraph checkpointer),
+# so switching clients or reloading the page restores prior history via the backend
+# rather than relying on any client-side cache.
 
 if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
+    st.session_state.session_id = None
 if "history" not in st.session_state:
     st.session_state.history = []
 if "client_id" not in st.session_state:
     st.session_state.client_id = None
+
+
+def _load_session(client_id: int) -> None:
+    st.session_state.client_id = client_id
+    st.session_state.session_id = f"client-{client_id}"
+    messages = _get(f"/sessions/{st.session_state.session_id}/messages") or []
+    st.session_state.history = [
+        {"role": m["role"], "content": m["content"], "handled_by": m.get("handled_by")}
+        for m in messages
+    ]
+
+
+def _select_client(client_id: int) -> None:
+    st.session_state.client_selector = client_id
+    _load_session(client_id)
+
 
 with st.sidebar:
     st.header("Client")
@@ -91,23 +120,43 @@ with st.sidebar:
     clients = get_clients()
     if clients:
         options = {c["id"]: f"{c['name']} — {c['industry']}" for c in clients}
-        selected_id = st.selectbox(
+
+        if st.session_state.client_id is None:
+            _select_client(clients[0]["id"])
+
+        st.selectbox(
             "Select client",
             options=list(options.keys()),
             format_func=lambda cid: options[cid],
             key="client_selector",
+            on_change=lambda: _load_session(st.session_state.client_selector),
         )
-        if selected_id != st.session_state.client_id:
-            st.session_state.client_id = selected_id
-            st.session_state.session_id = str(uuid.uuid4())
+
+        if st.button("New conversation"):
+            _delete(f"/sessions/{st.session_state.session_id}")
             st.session_state.history = []
+            st.rerun()
+
+        st.divider()
+        st.subheader("Sessions")
+        sessions = _get("/sessions") or []
+        if not sessions:
+            st.caption("No conversations yet — say hello in the Chat tab.")
+        for s in sessions:
+            is_active = s["client_id"] == st.session_state.client_id
+            label = f"{'● ' if is_active else '○ '}{s['client_name']}"
+            st.button(
+                label,
+                key=f"session_btn_{s['session_id']}",
+                use_container_width=True,
+                disabled=is_active,
+                on_click=_select_client,
+                args=(s["client_id"],),
+            )
+            preview = s["last_message_preview"]
+            st.caption(preview[:60] + "…" if len(preview) > 60 else preview)
     else:
         st.warning("No clients available.")
-
-    if st.button("New conversation"):
-        st.session_state.session_id = str(uuid.uuid4())
-        st.session_state.history = []
-        st.rerun()
 
     st.divider()
 
@@ -175,6 +224,11 @@ with tab_chat:
                         "handled_by": response["handled_by"],
                     }
                 )
+        # st.chat_input doesn't auto-float to the bottom when nested inside st.tabs(), so
+        # without this the input box renders inline where it's called — above the new
+        # exchange instead of below it. Rerunning replays the history loop with this turn
+        # already included, settling the input back below all messages.
+        st.rerun()
 
 
 # ── Tab 2: Cashflow dashboard ────────────────────────────────────────────────

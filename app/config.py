@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     langfuse_host: str = "https://cloud.langfuse.com"
     otel_exporter_otlp_endpoint: str = "http://localhost:4317"
     database_path: str = "data/vrm.db"
+    checkpoint_db_path: str = "data/checkpoints.db"
     backend_url: str = "http://localhost:8000"
 
 

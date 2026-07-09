@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from app.tools.cashflow_tools import CashGapResult, CashflowSummary, CategoryBreakdown
+from app.tools.chat_history_tools import ChatMessageRecord, SessionSummary
 from app.tools.product_tools import EligibilityResult, ProductInfo, ProductSearchResult
 
 
@@ -41,4 +42,6 @@ __all__ = [
     "ProductInfo",
     "ProductSearchResult",
     "EligibilityResult",
+    "ChatMessageRecord",
+    "SessionSummary",
 ]

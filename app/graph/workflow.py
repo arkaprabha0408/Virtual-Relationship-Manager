@@ -46,6 +46,23 @@ def get_llm() -> BaseChatModel:
     return ChatOpenAI(model=settings.openai_model, temperature=0, api_key=settings.openai_api_key)
 
 
+def _first_handoff_call_id(triggering_message: AIMessage) -> str | None:
+    """id of the first handoff-tool call in this AIMessage, or None if it has none.
+
+    A model can call two handoff tools in parallel for a compound query (e.g.
+    transfer_to_business_intel and transfer_to_product_expert together). Command-based
+    routing can only honor one `goto` target, so only the first such call may actually
+    route; any others must still get a real (non-Command) tool result so they don't end
+    up as orphaned tool_calls with no matching ToolMessage, which OpenAI rejects on the
+    next turn. Disabling parallel tool calls at the API level (`parallel_tool_calls=False`)
+    was tried instead and caused gpt-4o-mini to frequently hallucinate a fake
+    "{functions.transfer_to_x}" string instead of calling any tool at all — far worse than
+    the problem it solved — so this is handled here in code instead.
+    """
+    handoff_calls = [c for c in (triggering_message.tool_calls or []) if c["name"].startswith("transfer_to_")]
+    return handoff_calls[0]["id"] if handoff_calls else None
+
+
 def _make_handoff_tool(*, agent_name: str, description: str) -> BaseTool:
     tool_name = f"transfer_to_{agent_name}"
 
@@ -53,7 +70,12 @@ def _make_handoff_tool(*, agent_name: str, description: str) -> BaseTool:
     def handoff_tool(
         tool_call_id: Annotated[str, InjectedToolCallId],
         state: Annotated[VRMState, InjectedState],
-    ) -> Command:
+    ) -> Command | str:
+        triggering_message = state["messages"][-1]
+        first_id = _first_handoff_call_id(triggering_message)
+        if first_id is not None and first_id != tool_call_id:
+            return f"Not used: already routing via another handoff tool called in the same turn."
+
         tool_message = {
             "role": "tool",
             "content": f"Transferred to {agent_name}.",
@@ -187,11 +209,15 @@ def _make_completeness_hook(*, current_agent: str, other_agent: str, model: Base
                 SystemMessage(
                     content=(
                         f"The client asked: {original_query!r}\n\n"
-                        f"The {current_agent} specialist just answered the part of this "
-                        f"in their own domain. Does the client's message ALSO contain a "
-                        f"distinct question belonging to the {other_agent} specialist's "
-                        "domain that has not been answered yet? Reply with exactly one "
-                        "word: yes or no."
+                        f"The {current_agent} specialist just answered the part of this in "
+                        f"their own domain. Your ONLY job is to check for a SECOND, "
+                        f"CLEARLY DISTINCT question in that same message that belongs to "
+                        f"the {other_agent} specialist's domain instead.\n\n"
+                        "Default to 'no'. Only answer 'yes' if the client's message "
+                        "explicitly asks about both topics — never infer or guess an "
+                        "unstated second need, and never answer 'yes' just because the "
+                        f"topics are related or the {current_agent} specialist mentioned "
+                        f"{other_agent} in passing. Reply with exactly one word: yes or no."
                     )
                 )
             ]
@@ -230,22 +256,6 @@ def _with_client_context(base_prompt: str):
     return _prompt
 
 
-def _bind_tools_one_at_a_time(model: BaseChatModel, tools: list[BaseTool]) -> BaseChatModel:
-    """Force a single tool call per turn.
-
-    Command-based handoffs can only honor one `goto` target. If the model calls two
-    handoff tools in parallel (e.g. transfer_to_business_intel and
-    transfer_to_product_expert together for a compound query), the second tool call is
-    silently abandoned mid-flight and its tool call is orphaned forever in the history.
-    """
-    if hasattr(model, "bind_tools"):
-        try:
-            return model.bind_tools(tools, parallel_tool_calls=False)
-        except TypeError:
-            pass
-    return model.bind_tools(tools)
-
-
 def build_graph(
     llm: BaseChatModel | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
@@ -268,14 +278,14 @@ def build_graph(
     ]
 
     concierge_agent = create_react_agent(
-        _bind_tools_one_at_a_time(model, concierge_tools),
+        model,
         concierge_tools,
         prompt=_with_client_context(CONCIERGE_PROMPT),
         state_schema=VRMState,
         name="concierge",
     )
     business_intel_agent = create_react_agent(
-        _bind_tools_one_at_a_time(model, business_intel_tools),
+        model,
         business_intel_tools,
         prompt=_with_client_context(BUSINESS_INTEL_PROMPT),
         state_schema=VRMState,
@@ -285,7 +295,7 @@ def build_graph(
         ),
     )
     product_expert_agent = create_react_agent(
-        _bind_tools_one_at_a_time(model, product_expert_tools),
+        model,
         product_expert_tools,
         prompt=_with_client_context(PRODUCT_EXPERT_PROMPT),
         state_schema=VRMState,

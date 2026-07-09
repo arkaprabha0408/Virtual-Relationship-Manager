@@ -7,6 +7,13 @@ from app.tools.cashflow_tools import (
     get_cashflow_summary,
     get_category_breakdown,
 )
+from app.tools.chat_history_tools import (
+    clear_session,
+    list_messages,
+    list_sessions,
+    save_message,
+    session_id_for_client,
+)
 from app.tools.product_tools import (
     check_eligibility,
     get_product_details,
@@ -179,3 +186,45 @@ def test_check_eligibility_client_not_found(seeded_db: str) -> None:
 def test_check_eligibility_product_not_found(seeded_db: str) -> None:
     with pytest.raises(ValueError, match="not found"):
         check_eligibility(1, 999, db_path=seeded_db)
+
+
+# ── Chat history tests ───────────────────────────────────────────────────────────
+
+def test_session_id_for_client_is_deterministic() -> None:
+    assert session_id_for_client(7) == session_id_for_client(7)
+    assert session_id_for_client(7) != session_id_for_client(8)
+
+
+def test_save_and_list_messages(seeded_db: str) -> None:
+    session_id = "test-tools-session-1"
+    save_message(session_id, 4, "user", "How's my cashflow?", db_path=seeded_db)
+    save_message(
+        session_id, 4, "assistant", "Looking healthy.", handled_by="business_intel", db_path=seeded_db
+    )
+
+    messages = list_messages(session_id, db_path=seeded_db)
+    assert [m.role for m in messages] == ["user", "assistant"]
+    assert messages[0].content == "How's my cashflow?"
+    assert messages[1].handled_by == "business_intel"
+
+
+def test_list_sessions_includes_client_name(seeded_db: str) -> None:
+    session_id = "test-tools-session-2"
+    save_message(session_id, 6, "user", "Recommend a product", db_path=seeded_db)
+    save_message(session_id, 6, "assistant", "Sure, here's one.", handled_by="product_expert", db_path=seeded_db)
+
+    sessions = {s.session_id: s for s in list_sessions(db_path=seeded_db)}
+    assert session_id in sessions
+    summary = sessions[session_id]
+    assert summary.client_id == 6
+    assert summary.message_count == 2
+    assert summary.last_message_preview == "Sure, here's one."
+
+
+def test_clear_session_removes_messages(seeded_db: str) -> None:
+    session_id = "test-tools-session-3"
+    save_message(session_id, 9, "user", "hello", db_path=seeded_db)
+
+    clear_session(session_id, db_path=seeded_db)
+
+    assert list_messages(session_id, db_path=seeded_db) == []

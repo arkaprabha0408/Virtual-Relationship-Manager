@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.state import CompiledStateGraph
 
 from app.config import settings
@@ -17,18 +19,21 @@ from app.schemas.models import (
     CashflowSummary,
     CashGapResult,
     CategoryBreakdown,
+    ChatMessageRecord,
     ChatRequest,
     ChatResponse,
     ClientSummary,
     EligibilityResult,
     HealthResponse,
     ProductSearchResult,
+    SessionSummary,
 )
 from app.tools.cashflow_tools import (
     detect_cash_gaps,
     get_cashflow_summary,
     get_category_breakdown,
 )
+from app.tools.chat_history_tools import clear_session, list_messages, list_sessions, save_message
 from app.tools.client_tools import get_client, list_clients
 from app.tools.product_tools import check_eligibility, list_products
 
@@ -37,8 +42,10 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.graph = build_graph()
-    yield
+    Path(settings.checkpoint_db_path).parent.mkdir(parents=True, exist_ok=True)
+    async with AsyncSqliteSaver.from_conn_string(settings.checkpoint_db_path) as checkpointer:
+        app.state.graph = build_graph(checkpointer=checkpointer)
+        yield
 
 
 app = FastAPI(title="VRM Backend", lifespan=lifespan)
@@ -109,11 +116,36 @@ async def chat(
         "\n\n".join(m.content for m in turn_replies) if turn_replies else last_message.content
     )
     record_handled_by_score(trace.trace_id, handled_by)
+
+    save_message(request.session_id, request.client_id, "user", request.message)
+    save_message(request.session_id, request.client_id, "assistant", reply, handled_by=handled_by)
+
     return ChatResponse(
         reply=reply,
         handled_by=handled_by,
         session_id=request.session_id,
     )
+
+
+@app.get("/sessions", response_model=list[SessionSummary])
+async def get_sessions() -> list[SessionSummary]:
+    return list_sessions()
+
+
+@app.get("/sessions/{session_id}/messages", response_model=list[ChatMessageRecord])
+async def get_session_messages(session_id: str) -> list[ChatMessageRecord]:
+    return list_messages(session_id)
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(
+    session_id: str,
+    graph: CompiledStateGraph = Depends(get_graph),
+) -> dict[str, str]:
+    clear_session(session_id)
+    if graph.checkpointer is not None:
+        await graph.checkpointer.adelete_thread(session_id)
+    return {"status": "cleared"}
 
 
 @app.get("/clients", response_model=list[ClientSummary])
