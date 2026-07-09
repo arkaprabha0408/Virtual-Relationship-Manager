@@ -1,3 +1,7 @@
+# This is purely a dev tool, used for testing purpose.No direct role in the project.
+# It is used to interact with the agents directly, without the need of any frontend.
+
+
 from __future__ import annotations
 
 import sys

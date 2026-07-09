@@ -1,3 +1,5 @@
+# This file is used for configuration of pytest.
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 asyncio_mode = "auto"
